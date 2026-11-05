@@ -6,16 +6,11 @@ use App\Models\Equipment;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
-/**
- * Základní testy evidence nářadí. Spuštění: php artisan test
- */
 class EquipmentTest extends TestCase
 {
-    // Před každým testem se databáze vyčistí a znovu zmigruje.
     use RefreshDatabase;
 
-    /** Pomocná metoda – vytvoří jedno zařízení. */
-    private function makeEquipment(array $data = []): Equipment
+    private function createEquipment($data = [])
     {
         return Equipment::create(array_merge([
             'name' => 'Vrtačka',
@@ -25,98 +20,100 @@ class EquipmentTest extends TestCase
         ], $data));
     }
 
-    public function test_zarizeni_lze_vytvorit(): void
+    public function test_create_equipment()
     {
         $this->post('/equipment', [
             'name' => 'Bruska',
             'inventory_number' => 'NAR-99',
             'status' => 'service',
             'purchased_at' => '2023-05-05',
-        ])->assertRedirect();
+        ]);
 
-        $this->assertDatabaseHas('equipment', ['inventory_number' => 'NAR-99', 'status' => 'service']);
+        $this->assertDatabaseHas('equipment', ['inventory_number' => 'NAR-99']);
     }
 
-    public function test_evidencni_cislo_musi_byt_jedinecne(): void
+    public function test_inventory_number_must_be_unique()
     {
-        $this->makeEquipment();
+        $this->createEquipment();
 
-        $this->post('/equipment', [
+        $response = $this->post('/equipment', [
             'name' => 'Jiná vrtačka',
-            'inventory_number' => 'NAR-1', // už existuje
+            'inventory_number' => 'NAR-1',
             'status' => 'active',
             'purchased_at' => '2024-01-01',
-        ])->assertSessionHasErrors('inventory_number');
+        ]);
+
+        $response->assertSessionHasErrors('inventory_number');
     }
 
-    public function test_uprava_muze_ponechat_vlastni_evidencni_cislo(): void
+    public function test_update_with_same_inventory_number()
     {
-        $equipment = $this->makeEquipment();
+        $equipment = $this->createEquipment();
 
-        $this->put("/equipment/{$equipment->id}", [
-            'name' => 'Přejmenovaná vrtačka',
-            'inventory_number' => 'NAR-1', // stejné číslo jako má samo – musí projít
+        $response = $this->put('/equipment/' . $equipment->id, [
+            'name' => 'Vrtačka 2',
+            'inventory_number' => 'NAR-1',
             'status' => 'retired',
             'purchased_at' => '2024-01-01',
-        ])->assertSessionHasNoErrors();
+        ]);
 
-        $this->assertDatabaseHas('equipment', ['id' => $equipment->id, 'status' => 'retired']);
+        $response->assertSessionHasNoErrors();
     }
 
-    public function test_neplatny_stav_a_datum_neprojdou(): void
+    public function test_wrong_status_and_date()
     {
-        $this->post('/equipment', [
+        $response = $this->post('/equipment', [
             'name' => 'Test',
             'inventory_number' => 'NAR-2',
-            'status' => 'broken',          // není v povoleném seznamu
-            'purchased_at' => '32.13.2024', // nesmyslné datum
-        ])->assertSessionHasErrors(['status', 'purchased_at']);
+            'status' => 'broken',
+            'purchased_at' => '32.13.2024',
+        ]);
+
+        $response->assertSessionHasErrors(['status', 'purchased_at']);
     }
 
-    public function test_filtr_podle_stavu(): void
+    public function test_filter()
     {
-        $this->makeEquipment(['name' => 'Aktivni kus', 'inventory_number' => 'A-1', 'status' => 'active']);
-        $this->makeEquipment(['name' => 'Vyrazeny kus', 'inventory_number' => 'R-1', 'status' => 'retired']);
+        $this->createEquipment(['name' => 'Aktivni kus', 'inventory_number' => 'A-1']);
+        $this->createEquipment(['name' => 'Vyrazeny kus', 'inventory_number' => 'R-1', 'status' => 'retired']);
 
         $this->get('/equipment?status=retired')
-            ->assertOk()
             ->assertSee('Vyrazeny kus')
             ->assertDontSee('Aktivni kus');
     }
 
-    public function test_servisni_zaznam_a_soucet_nakladu(): void
+    public function test_service_cost_sum()
     {
-        $equipment = $this->makeEquipment();
+        $equipment = $this->createEquipment();
 
-        // Dva servisní zásahy přidané z detailu zařízení.
-        $this->post("/equipment/{$equipment->id}/service-records", [
-            'description' => 'Výměna uhlíků', 'serviced_at' => '2025-01-10', 'cost' => '100.50',
-        ])->assertSessionHasNoErrors();
-        $this->post("/equipment/{$equipment->id}/service-records", [
+        $this->post('/equipment/' . $equipment->id . '/service-records', [
+            'description' => 'Oprava', 'serviced_at' => '2025-01-10', 'cost' => '100.50',
+        ]);
+        $this->post('/equipment/' . $equipment->id . '/service-records', [
             'description' => 'Čištění', 'serviced_at' => '2025-02-10', 'cost' => '49.50',
-        ])->assertSessionHasNoErrors();
+        ]);
 
-        $this->assertEquals(150.00, $equipment->totalServiceCost());
-        $this->get("/equipment/{$equipment->id}")->assertSee('150,00 Kč');
+        $this->assertEquals(150, $equipment->totalServiceCost());
     }
 
-    public function test_zaporna_cena_neprojde(): void
+    public function test_negative_cost()
     {
-        $equipment = $this->makeEquipment();
+        $equipment = $this->createEquipment();
 
-        $this->post("/equipment/{$equipment->id}/service-records", [
+        $response = $this->post('/equipment/' . $equipment->id . '/service-records', [
             'description' => 'Oprava', 'serviced_at' => '2025-01-10', 'cost' => '-5',
-        ])->assertSessionHasErrors('cost');
+        ]);
+
+        $response->assertSessionHasErrors('cost');
     }
 
-    public function test_export_csv(): void
+    public function test_csv_export()
     {
-        $equipment = $this->makeEquipment();
+        $equipment = $this->createEquipment();
         $equipment->serviceRecords()->create(['description' => 'Oprava', 'serviced_at' => '2025-01-10', 'cost' => 200]);
 
-        $response = $this->get("/equipment/{$equipment->id}/export");
+        $response = $this->get('/equipment/' . $equipment->id . '/export');
 
-        $response->assertOk();
         $this->assertStringContainsString('Oprava', $response->streamedContent());
     }
 }

@@ -3,179 +3,104 @@
 namespace App\Http\Controllers;
 
 use App\Models\Equipment;
-use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
-use Illuminate\View\View;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
-/**
- * Resource controller pro zařízení (CRUD) + export servisní historie do CSV.
- */
 class EquipmentController extends Controller
 {
-    /**
-     * Seznam zařízení s možností filtrovat podle stavu (?status=active|service|retired).
-     */
-    public function index(Request $request): View
+    // seznam zarizeni + filtr podle stavu
+    public function index(Request $request)
     {
-        // Stav z URL – použijeme ho jen pokud je v povoleném seznamu.
-        $status = $request->query('status');
-        if (! is_string($status) || ! array_key_exists($status, Equipment::STATUSES)) {
+        $status = $request->status;
+
+        $query = Equipment::withSum('serviceRecords', 'cost')->orderBy('inventory_number');
+
+        // filtruju jen kdyz je stav v povolenem seznamu
+        if (in_array($status, array_keys(Equipment::STATUSES), true)) {
+            $query->where('status', $status);
+        } else {
             $status = null;
         }
 
-        // Načteme zařízení; withSum přidá ke každému součet servisních nákladů (sloupec service_records_sum_cost).
-        $equipment = Equipment::query()
-            ->when($status, fn ($query) => $query->where('status', $status))
-            ->withSum('serviceRecords', 'cost')
-            ->orderBy('inventory_number')
-            ->get();
+        $equipment = $query->get();
 
-        return view('equipment.index', [
-            'equipment' => $equipment,
-            'status'    => $status,
-        ]);
+        return view('equipment.index', compact('equipment', 'status'));
     }
 
-    /**
-     * Formulář pro nové zařízení.
-     */
-    public function create(): View
+    public function create()
     {
-        // Předáme prázdný model, aby formulář šel použít pro create i edit.
-        return view('equipment.create', ['equipment' => new Equipment(['status' => 'active'])]);
+        $equipment = new Equipment(['status' => 'active']);
+
+        return view('equipment.create', compact('equipment'));
     }
 
-    /**
-     * Uložení nového zařízení.
-     */
-    public function store(Request $request): RedirectResponse
+    public function store(Request $request)
     {
-        $data = $this->validateEquipment($request);
+        $data = $request->validate($this->rules());
 
         $equipment = Equipment::create($data);
 
-        return redirect()
-            ->route('equipment.show', $equipment)
-            ->with('success', 'Zařízení bylo přidáno.');
+        return redirect()->route('equipment.show', $equipment)->with('success', 'Zařízení bylo přidáno.');
     }
 
-    /**
-     * Detail zařízení se servisní historií a součtem nákladů.
-     */
-    public function show(Equipment $equipment): View
+    // detail zarizeni se servisni historii
+    public function show(Equipment $equipment)
     {
-        return view('equipment.show', [
-            'equipment' => $equipment,
-            'records'   => $equipment->serviceRecords,      // servisní historie (seřazená v modelu)
-            'totalCost' => $equipment->totalServiceCost(),  // součet nákladů
-        ]);
+        $records = $equipment->serviceRecords;
+        $totalCost = $equipment->totalServiceCost();
+
+        return view('equipment.show', compact('equipment', 'records', 'totalCost'));
     }
 
-    /**
-     * Formulář pro úpravu zařízení.
-     */
-    public function edit(Equipment $equipment): View
+    public function edit(Equipment $equipment)
     {
-        return view('equipment.edit', ['equipment' => $equipment]);
+        return view('equipment.edit', compact('equipment'));
     }
 
-    /**
-     * Uložení změn zařízení.
-     */
-    public function update(Request $request, Equipment $equipment): RedirectResponse
+    public function update(Request $request, Equipment $equipment)
     {
-        // Při úpravě předáme zařízení, aby unikátnost ignorovala jeho vlastní evidenční číslo.
-        $data = $this->validateEquipment($request, $equipment);
+        // posilam id, aby unique nehlasilo chybu na vlastni evidencni cislo
+        $data = $request->validate($this->rules($equipment->id));
 
         $equipment->update($data);
 
-        return redirect()
-            ->route('equipment.show', $equipment)
-            ->with('success', 'Zařízení bylo upraveno.');
+        return redirect()->route('equipment.show', $equipment)->with('success', 'Zařízení bylo upraveno.');
     }
 
-    /**
-     * Smazání zařízení (servisní záznamy se smažou díky cascadeOnDelete v migraci).
-     */
-    public function destroy(Equipment $equipment): RedirectResponse
+    public function destroy(Equipment $equipment)
     {
         $equipment->delete();
 
-        return redirect()
-            ->route('equipment.index')
-            ->with('success', 'Zařízení bylo smazáno.');
+        return redirect()->route('equipment.index')->with('success', 'Zařízení bylo smazáno.');
     }
 
-    /**
-     * Volitelné rozšíření: export servisní historie jednoho zařízení do CSV.
-     */
-    public function export(Equipment $equipment): StreamedResponse
+    // export servisni historie do csv
+    public function export(Equipment $equipment)
     {
-        // Název souboru, např. servis-NAR-0001.csv
-        $fileName = 'servis-' . $equipment->inventory_number . '.csv';
+        $records = $equipment->serviceRecords;
 
-        return response()->streamDownload(function () use ($equipment) {
-            $out = fopen('php://output', 'w');
+        return response()->streamDownload(function () use ($records, $equipment) {
+            $file = fopen('php://output', 'w');
+            fwrite($file, "\xEF\xBB\xBF"); // kvuli diakritice v Excelu
 
-            // BOM – aby Excel správně zobrazil českou diakritiku (UTF-8).
-            fwrite($out, "\xEF\xBB\xBF");
-
-            // Hlavička CSV (oddělovač ";" kvůli českému Excelu).
-            fputcsv($out, ['Datum servisu', 'Popis', 'Cena (Kč)'], ';');
-
-            // Jednotlivé servisní záznamy.
-            foreach ($equipment->serviceRecords as $record) {
-                fputcsv($out, [
-                    $record->serviced_at->format('Y-m-d'),
-                    $record->description,
-                    $record->cost,
-                ], ';');
+            fputcsv($file, ['Datum', 'Popis', 'Cena'], ';');
+            foreach ($records as $record) {
+                fputcsv($file, [$record->serviced_at->format('d.m.Y'), $record->description, $record->cost], ';');
             }
+            fputcsv($file, ['', 'Celkem', $equipment->totalServiceCost()], ';');
 
-            // Poslední řádek se součtem nákladů.
-            fputcsv($out, ['', 'Celkem', number_format($equipment->totalServiceCost(), 2, '.', '')], ';');
-
-            fclose($out);
-        }, $fileName, ['Content-Type' => 'text/csv; charset=UTF-8']);
+            fclose($file);
+        }, 'servis-' . $equipment->inventory_number . '.csv');
     }
 
-    /**
-     * Společná validace pro store i update.
-     *
-     * @param  Equipment|null  $equipment  upravované zařízení (null = nové)
-     */
-    private function validateEquipment(Request $request, ?Equipment $equipment = null): array
+    // validacni pravidla pro pridani i upravu
+    private function rules($id = null)
     {
-        return $request->validate([
-            // Název je povinný text.
-            'name' => ['required', 'string', 'max:255'],
-
-            // Evidenční číslo je povinné a jedinečné (při úpravě ignorujeme aktuální záznam).
-            'inventory_number' => [
-                'required',
-                'string',
-                'max:50',
-                Rule::unique('equipment', 'inventory_number')->ignore($equipment?->id),
-            ],
-
-            // Stav musí být jeden z povolených (active, service, retired).
+        return [
+            'name' => 'required|string|max:255',
+            'inventory_number' => ['required', 'string', 'max:50', Rule::unique('equipment')->ignore($id)],
             'status' => ['required', Rule::in(array_keys(Equipment::STATUSES))],
-
-            // Datum nákupu: přesný formát RRRR-MM-DD, rozumný rozsah (ne v budoucnosti, ne před r. 1900).
-            'purchased_at' => ['required', 'date_format:Y-m-d', 'after_or_equal:1900-01-01', 'before_or_equal:today'],
-        ], [
-            // České chybové hlášky.
-            'name.required'                => 'Zadejte název zařízení.',
-            'inventory_number.required'    => 'Zadejte evidenční číslo.',
-            'inventory_number.unique'      => 'Toto evidenční číslo už existuje.',
-            'status.required'              => 'Vyberte stav.',
-            'status.in'                    => 'Neplatný stav zařízení.',
-            'purchased_at.required'        => 'Zadejte datum nákupu.',
-            'purchased_at.date_format'     => 'Datum nákupu musí být ve formátu RRRR-MM-DD.',
-            'purchased_at.after_or_equal'  => 'Datum nákupu je příliš staré.',
-            'purchased_at.before_or_equal' => 'Datum nákupu nesmí být v budoucnosti.',
-        ]);
+            'purchased_at' => 'required|date_format:Y-m-d|after:1900-01-01|before_or_equal:today',
+        ];
     }
 }

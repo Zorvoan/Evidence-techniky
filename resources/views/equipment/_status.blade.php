@@ -1,7 +1,2 @@
-{{--
-    Štítek stavu zařízení – barevně i textově odlišený.
-    Použití: @include('equipment._status', ['status' => $item->status])
---}}
-<span class="badge badge-{{ $status }}">
-    {{ \App\Models\Equipment::STATUSES[$status] ?? $status }}
-</span>
+{{-- barevny stitek se stavem --}}
+<span class="status status-{{ $status }}">{{ App\Models\Equipment::STATUSES[$status] ?? $status }}</span>
