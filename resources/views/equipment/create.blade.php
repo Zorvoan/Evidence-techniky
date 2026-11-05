@@ -1,13 +1,19 @@
 @extends('layout')
 
 @section('content')
-    <h1>Nové zařízení</h1>
+    <div class="page-head">
+        <h1>Nové zařízení</h1>
+    </div>
 
-    <form method="POST" action="{{ route('equipment.store') }}">
-        @csrf
-        @include('equipment._form')
-        <button type="submit">Uložit</button>
-    </form>
+    <div class="card form-card">
+        <form method="POST" action="{{ route('equipment.store') }}">
+            @csrf
+            @include('equipment._form')
 
-    <p><a href="{{ route('equipment.index') }}">Zpět</a></p>
+            <div class="actions">
+                <button type="submit" class="btn btn-primary">Uložit</button>
+                <a href="{{ route('equipment.index') }}" class="btn">Zrušit</a>
+            </div>
+        </form>
+    </div>
 @endsection
